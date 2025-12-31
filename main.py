@@ -249,6 +249,53 @@ def filter_fixed_time_window(df, window_minutes=FIXED_WINDOW_MINUTES):
 
 
 # ======================
+# ORDER FLOW ANALYTICS HELPER FUNCTIONS
+# ======================
+def compute_forward_return(df, horizon_seconds=5):
+    """Compute forward return: (price_N_seconds_later - current_price) / current_price"""
+    if df.empty or 'mid_price' not in df.columns or 'ts' not in df.columns:
+        return pd.Series(dtype=float)
+    
+    df = df.copy().sort_values('ts')
+    df['forward_return'] = 0.0
+    
+    for i in range(len(df)):
+        current_time = df.iloc[i]['ts']
+        target_time = current_time + pd.Timedelta(seconds=horizon_seconds)
+        
+        # Find the row closest to target_time
+        future_rows = df[df['ts'] > target_time]
+        if not future_rows.empty:
+            future_idx = future_rows.index[0]
+            current_price = df.iloc[i]['mid_price']
+            future_price = df.iloc[future_idx]['mid_price']
+            if current_price > 0:
+                df.loc[df.index[i], 'forward_return'] = (future_price - current_price) / current_price
+    
+    return df['forward_return']
+
+
+def compute_zscore(series, rolling_window_ticks=100):
+    """Compute rolling z-score: (value - rolling_mean) / rolling_std"""
+    if series.empty:
+        return pd.Series(dtype=float)
+    
+    rolling_mean = series.rolling(window=rolling_window_ticks, min_periods=10).mean()
+    rolling_std = series.rolling(window=rolling_window_ticks, min_periods=10).std()
+    
+    zscore = (series - rolling_mean) / rolling_std.replace(0, pd.NA)
+    return zscore.fillna(0)
+
+
+def compute_percentile(series, value):
+    """Compute percentile of value in series"""
+    if series.empty or pd.isna(value):
+        return 50.0
+    
+    return (series < value).sum() / len(series) * 100
+
+
+# ======================
 # DASH LAYOUT
 # ======================
 app.layout = html.Div([
@@ -262,6 +309,33 @@ app.layout = html.Div([
         # Sidebar parameters
         html.Div([
             html.H3("Parameters", style={'marginTop': '0'}),
+            
+            # Time Windows Section
+            html.Details([
+                html.Summary("Time Windows", style={'fontWeight': 'bold', 'cursor': 'pointer'}),
+                html.Div([
+                    html.Label("View Window (minutes)", style={'display': 'block', 'marginTop': '10px'}),
+                    dcc.Dropdown(
+                        id='view_window_minutes',
+                        options=[{'label': f'{i} min', 'value': i} for i in [1, 3, 5, 10, 20, 30, 60]],
+                        value=10,
+                        style={'width': '100%', 'marginBottom': '10px'}
+                    ),
+                    html.Label("Analysis Window (minutes)", style={'display': 'block'}),
+                    dcc.Dropdown(
+                        id='analysis_window_minutes',
+                        options=[{'label': f'{i} min', 'value': i} for i in [1, 3, 5, 10, 20, 30, 60]] + [{'label': 'Auto (3x view)', 'value': 'auto'}],
+                        value='auto',
+                        style={'width': '100%', 'marginBottom': '10px'}
+                    ),
+                    dcc.Checklist(
+                        id='lock_windows',
+                        options=[{'label': 'Lock windows together', 'value': 'yes'}],
+                        value=[],
+                        style={'marginBottom': '10px'}
+                    ),
+                ])
+            ], open=True, style={'marginBottom': '15px'}),
             
             html.Details([
                 html.Summary("Balance & Fees", style={'fontWeight': 'bold', 'cursor': 'pointer'}),
@@ -468,6 +542,40 @@ app.layout = html.Div([
             # Equity curve
             dcc.Graph(id='equity-chart', style={'marginBottom': '20px'}),
             
+            # Order Flow Analytics Section
+            html.Div([
+                html.H2("📊 Order Flow Analytics", style={'marginTop': '30px', 'marginBottom': '20px', 'borderBottom': '2px solid #007bff', 'paddingBottom': '10px'}),
+                
+                # Horizon control
+                html.Div([
+                    html.Label("Forward Return Horizon (seconds): ", style={'display': 'inline-block', 'marginRight': '10px'}),
+                    dcc.Dropdown(
+                        id='horizon_seconds',
+                        options=[{'label': f'{i}s', 'value': i} for i in [1, 3, 5, 10, 20]],
+                        value=5,
+                        style={'width': '150px', 'display': 'inline-block'}
+                    ),
+                ], style={'marginBottom': '20px', 'padding': '10px', 'backgroundColor': '#f8f9fa', 'borderRadius': '5px'}),
+                
+                # Analytics Row 1: Z-Score and Distribution
+                html.Div([
+                    html.Div([
+                        dcc.Graph(id='imbalance-zscore-chart', style={'height': '400px'})
+                    ], style={'width': '60%', 'display': 'inline-block', 'paddingRight': '10px'}),
+                    html.Div([
+                        dcc.Graph(id='imbalance-distribution-chart', style={'height': '400px'})
+                    ], style={'width': '38%', 'display': 'inline-block', 'verticalAlign': 'top'}),
+                ], style={'marginBottom': '20px'}),
+                
+                # Analytics Row 2: Forward Return Scatter
+                html.Div([
+                    dcc.Graph(id='forward-return-scatter', style={'height': '400px', 'marginBottom': '20px'})
+                ]),
+                
+                # Regime/Quality Indicators Cards
+                html.Div(id='regime-cards', style={'display': 'grid', 'gridTemplateColumns': 'repeat(3, 1fr)', 'gap': '15px', 'marginBottom': '20px'}),
+            ], style={'marginTop': '20px', 'padding': '20px', 'backgroundColor': '#ffffff', 'borderRadius': '5px', 'border': '1px solid #ddd'}),
+            
             # Live orderbook
             html.Div([
                 html.H3("Live Orderbook Feed (Bybit WS)"),
@@ -593,7 +701,11 @@ app.index_string = '''
      Output('orderbook-table', 'children'),
      Output('orderbook-chart', 'figure'),
      Output('trade-log', 'children'),
-     Output('status-indicator', 'children')],
+     Output('status-indicator', 'children'),
+     Output('imbalance-zscore-chart', 'figure'),
+     Output('imbalance-distribution-chart', 'figure'),
+     Output('forward-return-scatter', 'figure'),
+     Output('regime-cards', 'children')],
     [Input('interval-component', 'n_intervals')],
     [State('start_balance', 'value'),
      State('fee_rate', 'value'),
@@ -606,10 +718,22 @@ app.index_string = '''
      State('short_th', 'value'),
      State('min_duration', 'value'),
      State('risk_pct', 'value'),
-     State('max_spread', 'value')]
+     State('max_spread', 'value'),
+     State('view_window_minutes', 'value'),
+     State('analysis_window_minutes', 'value'),
+     State('lock_windows', 'value'),
+     State('horizon_seconds', 'value')]
 )
 def update_dashboard(n, start_balance, fee_rate, tp_pct, sl_pct, use_dynamic, vol_window, 
-                     window, long_th, short_th, min_duration, risk_pct, max_spread):
+                     window, long_th, short_th, min_duration, risk_pct, max_spread,
+                     view_window_minutes, analysis_window_minutes, lock_windows, horizon_seconds):
+    # Helper to create empty analytics outputs
+    def empty_analytics_outputs():
+        empty_fig = go.Figure()
+        empty_fig.add_annotation(text="No data", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+        empty_fig.update_layout(template="plotly_white", height=400)
+        return (empty_fig, empty_fig, empty_fig, html.Div(""))
+    
     # Wrap entire callback in try-except for safety
     try:
         # Get live data (reduced from 2000 to 1000 for performance)
@@ -635,30 +759,53 @@ def update_dashboard(n, start_balance, fee_rate, tp_pct, sl_pct, use_dynamic, vo
                                         xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False,
                                         font=dict(size=20))
                 empty_fig.update_layout(template="plotly_white", height=400)
+                empty_analytics = empty_analytics_outputs()
                 return (empty_fig, empty_fig, html.Div("Waiting..."), 
                         html.Div("Waiting..."), empty_fig, html.Div(""), 
-                        html.Div(message, style={'color': 'orange'}))
+                        html.Div(message, style={'color': 'orange'}),
+                        *empty_analytics)
         except Exception as e:
             empty_fig = go.Figure()
             empty_fig.add_annotation(text=f"Error getting live data: {str(e)}", 
                                     xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
             empty_fig.update_layout(template="plotly_white", height=400)
+            empty_analytics = empty_analytics_outputs()
             return (empty_fig, empty_fig, html.Div("Error"), 
                     html.Div("Error"), empty_fig, html.Div(""), 
-                    html.Div(f"❌ Error getting data: {str(e)}", style={'color': 'red'}))
+                    html.Div(f"❌ Error getting data: {str(e)}", style={'color': 'red'}),
+                    *empty_analytics)
 
-        # ---- Fixed window logic ----
-        window_minutes = FIXED_WINDOW_MINUTES
-        view = filter_fixed_time_window(live_df, window_minutes=window_minutes)
-        if view.empty or len(view) < 10:
+        # ---- Dual window logic ----
+        # Handle lock_windows: if locked, set analysis = view
+        if lock_windows and 'yes' in lock_windows:
+            analysis_window_minutes = view_window_minutes
+        
+        # Handle 'auto' option: 3x view window, capped at 60
+        if analysis_window_minutes == 'auto':
+            analysis_window_minutes = min(view_window_minutes * 3, 60)
+        
+        # Ensure we have numeric values
+        view_window_minutes = int(view_window_minutes) if view_window_minutes else 10
+        analysis_window_minutes = int(analysis_window_minutes) if isinstance(analysis_window_minutes, (int, float)) else 30
+        
+        # Fetch data for analysis window (with small buffer for rolling calculations)
+        analysis_buffer_minutes = max(analysis_window_minutes + 5, 15)  # Add buffer
+        analysis_df = filter_fixed_time_window(live_df, window_minutes=analysis_buffer_minutes)
+        
+        # Filter to view window for visualization
+        view_df = filter_fixed_time_window(live_df, window_minutes=view_window_minutes)
+        
+        if view_df.empty or len(view_df) < 10:
             empty_fig = go.Figure()
-            empty_fig.add_annotation(text=f"Waiting for at least 10 data points in last {window_minutes} min...", 
+            empty_fig.add_annotation(text=f"Waiting for at least 10 data points in last {view_window_minutes} min...", 
                                     xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False,
                                     font=dict(size=20))
             empty_fig.update_layout(template="plotly_white", height=400)
+            empty_analytics = empty_analytics_outputs()
             return (empty_fig, empty_fig, html.Div("Waiting..."), 
                     html.Div("Waiting..."), empty_fig, html.Div(""), 
-                    html.Div("⏳ Waiting for data...", style={'color': 'orange'}))
+                    html.Div("⏳ Waiting for data...", style={'color': 'orange'}),
+                    *empty_analytics)
         
         # Run strategy on the underlying full dataframe, so trade/equity calculation is not visually dependent
         use_dynamic_bool = 'yes' in use_dynamic if use_dynamic else False
@@ -684,15 +831,19 @@ def update_dashboard(n, start_balance, fee_rate, tp_pct, sl_pct, use_dynamic, vo
             empty_fig.add_annotation(text=f"Error: {str(e)}", 
                                     xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
             empty_fig.update_layout(template="plotly_white", height=400)
+            empty_analytics = empty_analytics_outputs()
             return (empty_fig, empty_fig, html.Div("Error"), 
                     html.Div("Error"), empty_fig, html.Div(""), 
-                    html.Div(f"❌ Error: {str(e)}", style={'color': 'red'}))
+                    html.Div(f"❌ Error: {str(e)}", style={'color': 'red'}),
+                    *empty_analytics)
 
         if df.empty:
             empty_fig = go.Figure()
+            empty_analytics = empty_analytics_outputs()
             return (empty_fig, empty_fig, html.Div("No data"), 
                     html.Div("No data"), empty_fig, html.Div(""), 
-                    html.Div("❌ No data", style={'color': 'red'}))
+                    html.Div("❌ No data", style={'color': 'red'}),
+                    *empty_analytics)
         
         # Ensure visualization (main graph) uses only fixed time window:
         if 'ts' not in df.columns:
@@ -713,17 +864,39 @@ def update_dashboard(n, start_balance, fee_rate, tp_pct, sl_pct, use_dynamic, vo
         elif df['ts'].dt.tz != pd.Timestamp.utcnow().tz:
             df['ts'] = df['ts'].dt.tz_convert('UTC')
         
-        # Use timezone-aware timestamp for comparison
-        window_start = pd.Timestamp.utcnow() - pd.Timedelta(minutes=window_minutes)
-        view = df[df['ts'] >= window_start]
+        # Filter df to view window for visualization
+        if 'ts' not in df.columns:
+            empty_fig = go.Figure()
+            empty_fig.add_annotation(text="Missing timestamp column", 
+                                    xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+            empty_fig.update_layout(template="plotly_white", height=400)
+            empty_analytics = empty_analytics_outputs()
+            return (empty_fig, empty_fig, html.Div("Error"), 
+                    html.Div("Error"), empty_fig, html.Div(""), 
+                    html.Div("❌ Missing timestamp column", style={'color': 'red'}),
+                    *empty_analytics)
+        
+        # Ensure ts column is datetime type and timezone-aware (UTC)
+        if not pd.api.types.is_datetime64_any_dtype(df['ts']):
+            df['ts'] = pd.to_datetime(df['ts'], errors='coerce', utc=True)
+        if df['ts'].dt.tz is None:
+            df['ts'] = df['ts'].dt.tz_localize('UTC')
+        elif df['ts'].dt.tz != pd.Timestamp.utcnow().tz:
+            df['ts'] = df['ts'].dt.tz_convert('UTC')
+        
+        # Filter df to view window
+        view_window_start = pd.Timestamp.utcnow() - pd.Timedelta(minutes=view_window_minutes)
+        view = df[df['ts'] >= view_window_start].copy()
         if view.empty:
-            view = df.tail(300)
+            view = df.tail(300).copy()
         
         if view.empty:
             empty_fig = go.Figure()
+            empty_analytics = empty_analytics_outputs()
             return (empty_fig, empty_fig, html.Div("No view data"), 
                     html.Div("No view data"), empty_fig, html.Div(""), 
-                    html.Div("❌ No view data", style={'color': 'red'}))
+                    html.Div("❌ No view data", style={'color': 'red'}),
+                    *empty_analytics)
 
         # Get only recent trades and those visible on the current window
         end_ts = view["ts"].iloc[-1]
@@ -1050,10 +1223,179 @@ def update_dashboard(n, start_balance, fee_rate, tp_pct, sl_pct, use_dynamic, vo
             html.Span("✅ Live", style={'color': 'green', 'fontWeight': 'bold'}),
             html.Span(f" | {live_df_len} ticks", style={'marginLeft': '10px'}),
             html.Span(f" | Last update: {datetime.now().strftime('%H:%M:%S')}", style={'marginLeft': '10px', 'color': '#666'}),
-            html.Span(f" | Showing last {window_minutes} min window", style={'marginLeft': '10px', 'color': '#0066aa'})
+            html.Span(f" | View: {view_window_minutes}min, Analysis: {analysis_window_minutes}min", style={'marginLeft': '10px', 'color': '#0066aa'})
         ])
         
-        return fig, fig_eq, stats_children, table, fig_ob, trade_log, status
+        # ======================
+        # ORDER FLOW ANALYTICS
+        # ======================
+        try:
+            # Prepare analysis_df with required columns
+            if analysis_df.empty:
+                analysis_df = view_df.copy()
+            
+            # Ensure we have imbalance data
+            if 'l1_imb_smooth' not in analysis_df.columns:
+                # Compute if missing
+                if 'best_bid_size' in analysis_df.columns and 'best_ask_size' in analysis_df.columns:
+                    denom = (analysis_df["best_bid_size"] + analysis_df["best_ask_size"]).replace(0, pd.NA)
+                    analysis_df["l1_imbalance"] = (analysis_df["best_bid_size"] - analysis_df["best_ask_size"]) / denom
+                    analysis_df["l1_imb_smooth"] = analysis_df["l1_imbalance"].rolling(window=15, min_periods=1).mean()
+            
+            # Ensure view_df has same columns
+            if 'l1_imb_smooth' not in view_df.columns and 'l1_imb_smooth' in analysis_df.columns:
+                view_df = view_df.merge(analysis_df[['ts', 'l1_imb_smooth']], on='ts', how='left', suffixes=('', '_y'))
+                if 'l1_imb_smooth_y' in view_df.columns:
+                    view_df['l1_imb_smooth'] = view_df['l1_imb_smooth_y'].fillna(view_df.get('l1_imb_smooth', 0))
+            
+            # 1. Imbalance Z-Score Chart
+            if 'l1_imb_smooth' in analysis_df.columns and len(analysis_df) > 10:
+                # Compute rolling window size (approximate ticks per minute * analysis_window_minutes)
+                ticks_per_min = max(len(analysis_df) / max(analysis_window_minutes, 1), 10)
+                rolling_window = int(ticks_per_min * analysis_window_minutes)
+                rolling_window = min(max(rolling_window, 20), len(analysis_df))
+                
+                zscore = compute_zscore(analysis_df['l1_imb_smooth'], rolling_window)
+                # Filter to view window
+                view_zscore = zscore[zscore.index.isin(view_df.index)] if len(zscore) > 0 else pd.Series(dtype=float)
+                
+                fig_zscore = go.Figure()
+                if len(view_zscore) > 0 and len(view_df) > 0:
+                    fig_zscore.add_trace(go.Scatter(
+                        x=view_df['ts'], y=view_zscore.values,
+                        mode='lines', name='Imbalance Z-Score',
+                        line=dict(color='#9467bd', width=1.5)
+                    ))
+                    fig_zscore.add_hline(y=2, line_dash='dash', line_color='green', annotation_text='+2σ')
+                    fig_zscore.add_hline(y=-2, line_dash='dash', line_color='red', annotation_text='-2σ')
+                    fig_zscore.add_hline(y=0, line_width=1, line_color='gray')
+                fig_zscore.update_layout(
+                    title='Imbalance Z-Score (Analysis Window Rolling Stats)',
+                    template='plotly_white', height=400,
+                    xaxis_title='Time', yaxis_title='Z-Score'
+                )
+            else:
+                fig_zscore = go.Figure()
+                fig_zscore.add_annotation(text="Insufficient data for Z-Score", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+                fig_zscore.update_layout(template='plotly_white', height=400)
+            
+            # 2. Imbalance Distribution Histogram
+            if 'l1_imb_smooth' in view_df.columns and len(view_df) > 0:
+                fig_dist = go.Figure()
+                fig_dist.add_trace(go.Histogram(
+                    x=view_df['l1_imb_smooth'],
+                    nbinsx=30,
+                    name='Imbalance Distribution',
+                    marker_color='#9467bd'
+                ))
+                fig_dist.update_layout(
+                    title='Imbalance Distribution (View Window)',
+                    template='plotly_white', height=400,
+                    xaxis_title='L1 Imbalance (smooth)', yaxis_title='Frequency'
+                )
+            else:
+                fig_dist = go.Figure()
+                fig_dist.add_annotation(text="No imbalance data", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+                fig_dist.update_layout(template='plotly_white', height=400)
+            
+            # 3. Forward Return Scatter
+            if 'l1_imb_smooth' in view_df.columns and 'mid_price' in view_df.columns and len(view_df) > 10:
+                horizon_seconds = int(horizon_seconds) if horizon_seconds else 5
+                forward_returns = compute_forward_return(view_df.copy(), horizon_seconds)
+                
+                if len(forward_returns) > 0 and not forward_returns.isna().all():
+                    valid_mask = ~forward_returns.isna()
+                    fig_scatter = go.Figure()
+                    fig_scatter.add_trace(go.Scatter(
+                        x=view_df.loc[valid_mask, 'l1_imb_smooth'],
+                        y=forward_returns[valid_mask] * 100,  # Convert to percentage
+                        mode='markers',
+                        name='Forward Return',
+                        marker=dict(size=4, color='#2ca02c', opacity=0.6)
+                    ))
+                    
+                    # Compute correlation
+                    if valid_mask.sum() > 5:
+                        corr = view_df.loc[valid_mask, 'l1_imb_smooth'].corr(forward_returns[valid_mask])
+                        corr_text = f"Correlation: {corr:.3f}" if not pd.isna(corr) else "Correlation: N/A"
+                        fig_scatter.update_layout(
+                            title=f'Imbalance vs Forward Return ({horizon_seconds}s) - {corr_text}',
+                            template='plotly_white', height=400,
+                            xaxis_title='L1 Imbalance (smooth)', yaxis_title=f'Forward Return ({horizon_seconds}s) %'
+                        )
+                    else:
+                        fig_scatter.update_layout(
+                            title=f'Imbalance vs Forward Return ({horizon_seconds}s)',
+                            template='plotly_white', height=400,
+                            xaxis_title='L1 Imbalance (smooth)', yaxis_title=f'Forward Return ({horizon_seconds}s) %'
+                        )
+                else:
+                    fig_scatter = go.Figure()
+                    fig_scatter.add_annotation(text="Insufficient data for forward returns", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+                    fig_scatter.update_layout(template='plotly_white', height=400)
+            else:
+                fig_scatter = go.Figure()
+                fig_scatter.add_annotation(text="No data for scatter plot", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+                fig_scatter.update_layout(template='plotly_white', height=400)
+            
+            # 4. Regime/Quality Indicator Cards
+            regime_cards = []
+            try:
+                # Current spread + percentile
+                if 'spread' in analysis_df.columns and len(analysis_df) > 10:
+                    current_spread = view_df['spread'].iloc[-1] if 'spread' in view_df.columns and len(view_df) > 0 else 0
+                    spread_percentile = compute_percentile(analysis_df['spread'], current_spread)
+                    regime_cards.append(html.Div([
+                        html.H4("Spread", style={'margin': '0', 'color': '#666'}),
+                        html.P(f"{current_spread:.4f} USDT", style={'fontSize': '20px', 'fontWeight': 'bold', 'margin': '5px 0'}),
+                        html.P(f"Percentile: {spread_percentile:.1f}%", style={'fontSize': '14px', 'color': '#666'})
+                    ], style={'textAlign': 'center', 'padding': '15px', 'backgroundColor': '#f8f9fa', 'borderRadius': '5px', 'border': '1px solid #ddd'}))
+                
+                # Current imbalance + percentile
+                if 'l1_imb_smooth' in analysis_df.columns and len(analysis_df) > 10:
+                    current_imb = view_df['l1_imb_smooth'].iloc[-1] if 'l1_imb_smooth' in view_df.columns and len(view_df) > 0 else 0
+                    imb_percentile = compute_percentile(analysis_df['l1_imb_smooth'], current_imb)
+                    regime_cards.append(html.Div([
+                        html.H4("Imbalance", style={'margin': '0', 'color': '#666'}),
+                        html.P(f"{current_imb:.3f}", style={'fontSize': '20px', 'fontWeight': 'bold', 'margin': '5px 0'}),
+                        html.P(f"Percentile: {imb_percentile:.1f}%", style={'fontSize': '14px', 'color': '#666'})
+                    ], style={'textAlign': 'center', 'padding': '15px', 'backgroundColor': '#f8f9fa', 'borderRadius': '5px', 'border': '1px solid #ddd'}))
+                
+                # Signal quality score
+                if len(regime_cards) >= 2 and 'l1_imb_smooth' in view_df.columns:
+                    current_imb = view_df['l1_imb_smooth'].iloc[-1] if len(view_df) > 0 else 0
+                    if 'spread' in analysis_df.columns:
+                        current_spread = view_df['spread'].iloc[-1] if 'spread' in view_df.columns and len(view_df) > 0 else 0
+                        spread_percentile = compute_percentile(analysis_df['spread'], current_spread)
+                        # Compute z-score for imbalance
+                        if len(analysis_df) > 10:
+                            ticks_per_min = max(len(analysis_df) / max(analysis_window_minutes, 1), 10)
+                            rolling_window = int(ticks_per_min * analysis_window_minutes)
+                            rolling_window = min(max(rolling_window, 20), len(analysis_df))
+                            zscore_imb = compute_zscore(analysis_df['l1_imb_smooth'], rolling_window)
+                            current_z = zscore_imb.iloc[-1] if len(zscore_imb) > 0 else 0
+                            quality_score = abs(current_z) * (1 - spread_percentile / 100)
+                            regime_cards.append(html.Div([
+                                html.H4("Signal Quality", style={'margin': '0', 'color': '#666'}),
+                                html.P(f"{quality_score:.2f}", style={'fontSize': '20px', 'fontWeight': 'bold', 'margin': '5px 0',
+                                    'color': '#2ca02c' if quality_score > 0.5 else '#d62728'}),
+                                html.P(f"|z| × (1-p_spread)", style={'fontSize': '12px', 'color': '#666'})
+                            ], style={'textAlign': 'center', 'padding': '15px', 'backgroundColor': '#f8f9fa', 'borderRadius': '5px', 'border': '1px solid #ddd'}))
+            except Exception as e:
+                logger.error(f"Error computing regime cards: {e}")
+            
+            if not regime_cards:
+                regime_cards = [html.Div("Insufficient data for regime indicators", style={'padding': '15px'})]
+            
+        except Exception as e:
+            logger.error(f"Error in analytics computation: {e}", exc_info=True)
+            empty_fig = go.Figure()
+            empty_fig.add_annotation(text=f"Analytics error: {str(e)[:50]}", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+            empty_fig.update_layout(template='plotly_white', height=400)
+            fig_zscore = fig_dist = fig_scatter = empty_fig
+            regime_cards = [html.Div("Error computing analytics", style={'padding': '15px'})]
+        
+        return fig, fig_eq, stats_children, table, fig_ob, trade_log, status, fig_zscore, fig_dist, fig_scatter, html.Div(regime_cards)
     
     except Exception as e:
         # Catch any unexpected errors and return error state
@@ -1068,9 +1410,11 @@ def update_dashboard(n, start_balance, fee_rate, tp_pct, sl_pct, use_dynamic, vo
                                 font=dict(size=16))
         empty_fig.update_layout(template="plotly_white", height=400)
         
+        empty_analytics = empty_analytics_outputs()
         return (empty_fig, empty_fig, html.Div("Error"), 
                 html.Div("Error"), empty_fig, html.Div(""), 
-                html.Div(f"❌ Unexpected error: {error_msg}", style={'color': 'red'}))
+                html.Div(f"❌ Unexpected error: {error_msg}", style={'color': 'red'}),
+                *empty_analytics)
 
 # Make server accessible for gunicorn
 server = app.server
