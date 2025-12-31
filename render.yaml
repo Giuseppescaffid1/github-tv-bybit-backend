@@ -3,7 +3,6 @@ services:
   - type: web
     name: bybit-trading-dashboard
     runtime: python
-    rootDir: app
     buildCommand: pip install -r requirements.txt
     startCommand: python -c "from database import init_db; init_db()" && gunicorn --bind 0.0.0.0:$PORT app:server
     envVars:
@@ -15,7 +14,6 @@ services:
   - type: worker
     name: bybit-data-collector
     runtime: python
-    rootDir: app
     buildCommand: pip install -r requirements.txt
     startCommand: python data_collector.py
     envVars:
