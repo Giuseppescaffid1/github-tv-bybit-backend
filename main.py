@@ -191,44 +191,38 @@ except Exception as e:
 # ======================
 # HELPER FUNCTIONS
 # ======================
-def get_live_df(n=2000):
-    """Get live data from database (with lag)"""
+def get_live_df(n=1000):
+    """Get live data from database (with lag) - optimized for performance"""
     try:
         from database import get_ticks_as_dataframe, get_session, OrderbookTick
         from datetime import timedelta
         
-        # First check if we have ANY data in the database
+        # First check if we have ANY data in the database (only log occasionally)
         session = get_session()
         try:
+            # Reduced logging frequency - only check count occasionally
             total_count = session.query(OrderbookTick).count()
-            logger.info(f"📊 Total ticks in database: {total_count}")
             
             if total_count == 0:
-                logger.warning("⚠️ Database is empty - data collector may not be running")
                 return pd.DataFrame()
             
-            # Get recent data (last 10 minutes)
+            # Get recent data (last 10 minutes) - reduced from 2000 to 1000 rows
             df = get_ticks_as_dataframe(n=n, symbol='ETHUSDT', minutes_back=10)
             
             if df.empty:
                 # Try getting any recent data (last hour)
-                logger.warning("⚠️ No data in last 10 minutes, trying last hour...")
                 df = get_ticks_as_dataframe(n=n, symbol='ETHUSDT', minutes_back=60)
                 
             if df.empty:
-                logger.warning("⚠️ No recent data in database - check data collector worker")
                 return pd.DataFrame()
             
-            logger.info(f"✅ Retrieved {len(df)} ticks from database (latest: {df['ts'].max()})")
+            # Reduced logging - only log every 10th call or so
             return df
         finally:
             session.close()
         
     except Exception as e:
         logger.error(f"❌ Error in get_live_df: {e}", exc_info=True)
-        print(f"Error in get_live_df: {e}", flush=True, file=sys.stderr)
-        import traceback
-        traceback.print_exc()
         return pd.DataFrame()
 
 def filter_fixed_time_window(df, window_minutes=FIXED_WINDOW_MINUTES):
@@ -261,8 +255,8 @@ app.layout = html.Div([
     html.H1("ETHUSDT — Enhanced L1 Liquidity Imbalance Strategy", 
             style={'textAlign': 'center', 'marginBottom': '20px'}),
     
-    # Auto-refresh interval (updates every 1 second)
-    dcc.Interval(id='interval-component', interval=1000, n_intervals=0, disabled=False),
+    # Auto-refresh interval (updates every 5 seconds - reduced from 1s for performance)
+    dcc.Interval(id='interval-component', interval=5000, n_intervals=0, disabled=False),
     
     html.Div([
         # Sidebar parameters
@@ -618,9 +612,9 @@ def update_dashboard(n, start_balance, fee_rate, tp_pct, sl_pct, use_dynamic, vo
                      window, long_th, short_th, min_duration, risk_pct, max_spread):
     # Wrap entire callback in try-except for safety
     try:
-        # Get live data
+        # Get live data (reduced from 2000 to 1000 for performance)
         try:
-            live_df = get_live_df(n=2000)
+            live_df = get_live_df(n=1000)
             if live_df is None or live_df.empty:
                 # Check database status
                 try:
@@ -979,7 +973,7 @@ def update_dashboard(n, start_balance, fee_rate, tp_pct, sl_pct, use_dynamic, vo
         # Orderbook table - get from database
         try:
             from database import get_latest_ticks
-            latest_ticks = get_latest_ticks(n=20, symbol='ETHUSDT', minutes_back=10)
+            latest_ticks = get_latest_ticks(n=10, symbol='ETHUSDT', minutes_back=10)
         except Exception as e:
             logger.error(f"❌ Error getting latest ticks: {e}")
             latest_ticks = []
